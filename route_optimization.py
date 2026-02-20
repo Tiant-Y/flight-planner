@@ -1,10 +1,23 @@
 # route_optimization.py
-# Route Optimization: Great Circle + Wind Optimization
-# Calculates optimal flight paths considering winds aloft
+# Route Optimization: Great Circle + Wind Optimization + Real Waypoints
+# Calculates optimal flight paths considering winds aloft and uses real aviation waypoints
 
 import math
 from typing import List, Tuple, Dict
 from airport_database import lookup_airport
+from real_waypoints import generate_route_with_real_waypoints, get_all_waypoints
+
+# Import comprehensive waypoint database (50,000+ waypoints worldwide)
+try:
+    from comprehensive_waypoints import (
+        load_waypoint_database, 
+        find_waypoint as find_comprehensive_waypoint,
+        generate_realistic_route as generate_comprehensive_route
+    )
+    COMPREHENSIVE_DB_AVAILABLE = True
+except ImportError:
+    COMPREHENSIVE_DB_AVAILABLE = False
+    print("⚠️ Comprehensive waypoint database not available")
 
 
 # ── GREAT CIRCLE CALCULATIONS ─────────────────────────────────────────────────
@@ -75,7 +88,10 @@ def calculate_intermediate_point(lat1: float, lon1: float,
 def generate_route_waypoints(origin_code: str, dest_code: str, 
                             num_waypoints: int = 5) -> Dict:
     """
-    Generate waypoints along great circle route.
+    Generate waypoints along great circle route using real aviation waypoints.
+    Uses two-tier system:
+    1. First tries curated real_waypoints.py (fast, common routes)
+    2. Falls back to comprehensive database (complete worldwide coverage)
     
     Args:
         origin_code: Origin airport code
@@ -83,7 +99,7 @@ def generate_route_waypoints(origin_code: str, dest_code: str,
         num_waypoints: Number of intermediate waypoints (default 5)
     
     Returns:
-        dict with route information and waypoints
+        dict with route information and waypoints (uses real waypoint names like IGARI, VCENT)
     """
     # Look up airports
     origin = lookup_airport(origin_code)
@@ -110,42 +126,79 @@ def generate_route_waypoints(origin_code: str, dest_code: str,
     )
     final_bearing = (final_bearing + 180) % 360  # Reverse direction
     
-    # Generate waypoints
-    waypoints = []
-    for i in range(num_waypoints + 2):
-        fraction = i / (num_waypoints + 1)
-        lat, lon = calculate_intermediate_point(
-            origin['lat'], origin['lon'],
-            dest['lat'], dest['lon'],
-            fraction
-        )
-        
-        # Distance from origin
-        distance_from_origin = distance_nm * fraction
-        
-        # Bearing at this point
-        if i == 0:
-            bearing = initial_bearing
-        elif i == num_waypoints + 1:
-            bearing = final_bearing
-        else:
-            # Calculate local bearing
-            next_lat, next_lon = calculate_intermediate_point(
+    # Try to generate waypoints using curated database first
+    real_waypoints = generate_route_with_real_waypoints(origin_code, dest_code, num_waypoints)
+    
+    # If no waypoints found and comprehensive database is available, use it
+    if (not real_waypoints or len(real_waypoints) == 0) and COMPREHENSIVE_DB_AVAILABLE:
+        try:
+            print(f"🔍 Using comprehensive waypoint database for {origin_code} → {dest_code}")
+            comprehensive_wps = generate_comprehensive_route(
                 origin['lat'], origin['lon'],
                 dest['lat'], dest['lon'],
-                fraction + 0.01
+                num_waypoints
             )
-            bearing = calculate_bearing(lat, lon, next_lat, next_lon)
+            
+            # Convert comprehensive format to our format
+            real_waypoints = []
+            for i, wp in enumerate(comprehensive_wps, 1):
+                real_waypoints.append({
+                    "number": i,
+                    "name": wp['ident'],
+                    "lat": wp['lat'],
+                    "lon": wp['lon'],
+                    "region": wp.get('region', 'N/A'),
+                    "type": "comprehensive_waypoint"
+                })
+        except Exception as e:
+            print(f"⚠️ Error using comprehensive database: {e}")
+    
+    # Build complete waypoint list with origin and destination
+    waypoints = []
+    
+    # Add origin
+    waypoints.append({
+        "number": 0,
+        "lat": origin['lat'],
+        "lon": origin['lon'],
+        "distance_from_origin_nm": 0,
+        "bearing": initial_bearing,
+        "name": origin['city'],
+        "type": "airport"
+    })
+    
+    # Add intermediate waypoints (real, comprehensive, or generated)
+    for wp in real_waypoints:
+        distance_from_origin = haversine_distance(
+            origin['lat'], origin['lon'],
+            wp['lat'], wp['lon']
+        )
         
-        waypoint = {
-            "number": i,
-            "lat": round(lat, 4),
-            "lon": round(lon, 4),
+        waypoints.append({
+            "number": wp['number'],
+            "lat": wp['lat'],
+            "lon": wp['lon'],
             "distance_from_origin_nm": round(distance_from_origin, 1),
-            "bearing": round(bearing, 1),
-            "name": origin['city'] if i == 0 else (dest['city'] if i == num_waypoints + 1 else f"WPT{i}")
-        }
-        waypoints.append(waypoint)
+            "bearing": round(calculate_bearing(wp['lat'], wp['lon'], 
+                                              dest['lat'], dest['lon']), 1),
+            "name": wp['name'],
+            "type": wp.get('type', 'waypoint'),
+            "region": wp.get('region', 'N/A')
+        })
+    
+    # Add destination
+    waypoints.append({
+        "number": num_waypoints + 1,
+        "lat": dest['lat'],
+        "lon": dest['lon'],
+        "distance_from_origin_nm": round(distance_nm, 1),
+        "bearing": final_bearing,
+        "name": dest['city'],
+        "type": "airport"
+    })
+    
+    # Count real waypoints
+    real_wp_count = sum(1 for wp in waypoints if wp.get('type') in ['real_waypoint', 'comprehensive_waypoint'])
     
     return {
         "origin": {
@@ -162,12 +215,21 @@ def generate_route_waypoints(origin_code: str, dest_code: str,
             "lat": dest['lat'],
             "lon": dest['lon']
         },
-        "route_type": "Great Circle",
+        "route_type": "Great Circle with Real Waypoints",
         "total_distance_nm": round(distance_nm, 1),
         "initial_bearing": round(initial_bearing, 1),
         "final_bearing": round(final_bearing, 1),
-        "waypoints": waypoints
+        "waypoints": waypoints,
+        "real_waypoints_used": real_wp_count,
+        "total_waypoints": len(waypoints) - 2,  # Excluding origin and destination
+        "database_used": "comprehensive" if COMPREHENSIVE_DB_AVAILABLE and real_wp_count > 0 else "curated"
     }
+    
+    # Calculate total distance
+    distance_nm = haversine_distance(
+        origin['lat'], origin['lon'], 
+        dest['lat'], dest['lon']
+    )
 
 
 def haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
