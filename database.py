@@ -1,6 +1,6 @@
 # database.py
 # User Authentication & Flight History Database
-# Uses SQLite for local storage (can be upgraded to PostgreSQL for production)
+# Supports both SQLite (local) and PostgreSQL (production)
 
 import sqlite3
 import hashlib
@@ -9,31 +9,132 @@ from datetime import datetime
 from typing import Optional, List, Dict
 import os
 
+# Try to import PostgreSQL driver
+try:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+    POSTGRES_AVAILABLE = True
+except ImportError:
+    POSTGRES_AVAILABLE = False
+
 
 # ── DATABASE CONFIGURATION ────────────────────────────────────────────────────
-DB_PATH = "flight_planner.db"
+DATABASE_URL = os.getenv("DATABASE_URL")  # PostgreSQL connection string from Supabase
+
+if DATABASE_URL and POSTGRES_AVAILABLE:
+    USE_POSTGRES = True
+    print("✅ Using PostgreSQL (persistent database)")
+else:
+    USE_POSTGRES = False
+    DB_PATH = "flight_planner.db"
+    print("⚠️ Using SQLite (local database - will reset on cloud deployment)")
+
+
+# ── DATABASE CONNECTION ───────────────────────────────────────────────────────
+
+def get_connection():
+    """Get database connection (PostgreSQL or SQLite)"""
+    if USE_POSTGRES:
+        return psycopg2.connect(DATABASE_URL)
+    else:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        return conn
 
 
 # ── DATABASE INITIALIZATION ───────────────────────────────────────────────────
 
 def init_database():
-    """Initialize database with required tables"""
-    conn = sqlite3.connect(DB_PATH)
+    """Initialize database with required tables (works with SQLite or PostgreSQL)"""
+    conn = get_connection()
     cursor = conn.cursor()
     
+    # Adjust SQL for PostgreSQL vs SQLite
+    if USE_POSTGRES:
+        # PostgreSQL uses SERIAL for auto-increment
+        user_id_type = "SERIAL PRIMARY KEY"
+        plan_id_type = "SERIAL PRIMARY KEY"
+        flight_id_type = "SERIAL PRIMARY KEY"
+        timestamp_default = "DEFAULT CURRENT_TIMESTAMP"
+    else:
+        # SQLite uses INTEGER PRIMARY KEY AUTOINCREMENT
+        user_id_type = "INTEGER PRIMARY KEY AUTOINCREMENT"
+        plan_id_type = "INTEGER PRIMARY KEY AUTOINCREMENT"
+        flight_id_type = "INTEGER PRIMARY KEY AUTOINCREMENT"
+        timestamp_default = "DEFAULT CURRENT_TIMESTAMP"
+    
     # Users table
-    cursor.execute("""
+    cursor.execute(f"""
         CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id {user_id_type},
             username TEXT UNIQUE NOT NULL,
             email TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
             full_name TEXT,
             pilot_license TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            created_at TIMESTAMP {timestamp_default},
             last_login TIMESTAMP
         )
     """)
+    
+    # Flight plans table
+    cursor.execute(f"""
+        CREATE TABLE IF NOT EXISTS flight_plans (
+            plan_id {plan_id_type},
+            user_id INTEGER NOT NULL,
+            plan_name TEXT,
+            aircraft_code TEXT NOT NULL,
+            origin_icao TEXT NOT NULL,
+            destination_icao TEXT NOT NULL,
+            distance_nm REAL,
+            altitude_ft INTEGER,
+            headwind_kt REAL,
+            fuel_required_kg REAL,
+            flight_time_hr REAL,
+            route_data TEXT,
+            weather_data TEXT,
+            airspace_check TEXT,
+            etops_check TEXT,
+            status TEXT DEFAULT 'draft',
+            approved BOOLEAN DEFAULT false,
+            created_at TIMESTAMP {timestamp_default},
+            updated_at TIMESTAMP {timestamp_default},
+            FOREIGN KEY (user_id) REFERENCES users(user_id)
+        )
+    """)
+    
+    # Flight history table
+    cursor.execute(f"""
+        CREATE TABLE IF NOT EXISTS flight_history (
+            flight_id {flight_id_type},
+            user_id INTEGER NOT NULL,
+            plan_id INTEGER,
+            flight_date DATE,
+            actual_fuel_used_kg REAL,
+            actual_flight_time_hr REAL,
+            notes TEXT,
+            created_at TIMESTAMP {timestamp_default},
+            FOREIGN KEY (user_id) REFERENCES users(user_id),
+            FOREIGN KEY (plan_id) REFERENCES flight_plans(plan_id)
+        )
+    """)
+    
+    # User preferences table
+    cursor.execute(f"""
+        CREATE TABLE IF NOT EXISTS user_preferences (
+            user_id INTEGER PRIMARY KEY,
+            preferred_units TEXT DEFAULT 'metric',
+            default_aircraft TEXT,
+            default_altitude_ft INTEGER DEFAULT 35000,
+            enable_notifications BOOLEAN DEFAULT true,
+            theme TEXT DEFAULT 'dark',
+            FOREIGN KEY (user_id) REFERENCES users(user_id)
+        )
+    """)
+    
+    conn.commit()
+    conn.close()
+    print("✅ Database initialized successfully")
     
     # Flight plans table
     cursor.execute("""
@@ -111,20 +212,29 @@ def create_user(username: str, email: str, password: str,
         dict with success status and user_id or error message
     """
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_connection()
         cursor = conn.cursor()
         
         password_hash = hash_password(password)
         
         cursor.execute("""
             INSERT INTO users (username, email, password_hash, full_name, pilot_license)
+            VALUES (%s, %s, %s, %s, %s) RETURNING user_id
+        """ if USE_POSTGRES else """
+            INSERT INTO users (username, email, password_hash, full_name, pilot_license)
             VALUES (?, ?, ?, ?, ?)
         """, (username, email, password_hash, full_name, pilot_license))
         
-        user_id = cursor.lastrowid
+        if USE_POSTGRES:
+            user_id = cursor.fetchone()[0]
+        else:
+            user_id = cursor.lastrowid
         
         # Create default preferences
         cursor.execute("""
+            INSERT INTO user_preferences (user_id)
+            VALUES (%s)
+        """ if USE_POSTGRES else """
             INSERT INTO user_preferences (user_id)
             VALUES (?)
         """, (user_id,))
@@ -138,12 +248,13 @@ def create_user(username: str, email: str, password: str,
             "message": f"User '{username}' created successfully"
         }
     
-    except sqlite3.IntegrityError as e:
-        return {
-            "success": False,
-            "error": "Username or email already exists"
-        }
     except Exception as e:
+        error_msg = str(e)
+        if "unique" in error_msg.lower() or "duplicate" in error_msg.lower():
+            return {
+                "success": False,
+                "error": "Username or email already exists"
+            }
         return {
             "success": False,
             "error": str(e)
@@ -158,12 +269,16 @@ def authenticate_user(username: str, password: str) -> Optional[Dict]:
         User dict if successful, None if failed
     """
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_connection()
         cursor = conn.cursor()
         
         password_hash = hash_password(password)
         
         cursor.execute("""
+            SELECT user_id, username, email, full_name, pilot_license, created_at
+            FROM users
+            WHERE username = %s AND password_hash = %s
+        """ if USE_POSTGRES else """
             SELECT user_id, username, email, full_name, pilot_license, created_at
             FROM users
             WHERE username = ? AND password_hash = ?
@@ -172,22 +287,30 @@ def authenticate_user(username: str, password: str) -> Optional[Dict]:
         result = cursor.fetchone()
         
         if result:
+            if USE_POSTGRES:
+                user_data = result
+            else:
+                user_data = dict(result)
+            
             # Update last login
             cursor.execute("""
                 UPDATE users SET last_login = CURRENT_TIMESTAMP
+                WHERE user_id = %s
+            """ if USE_POSTGRES else """
+                UPDATE users SET last_login = CURRENT_TIMESTAMP
                 WHERE user_id = ?
-            """, (result[0],))
+            """, (user_data['user_id'] if USE_POSTGRES else user_data['user_id'],))
             conn.commit()
             
             conn.close()
             
             return {
-                "user_id": result[0],
-                "username": result[1],
-                "email": result[2],
-                "full_name": result[3],
-                "pilot_license": result[4],
-                "created_at": result[5]
+                "user_id": user_data['user_id'] if USE_POSTGRES else user_data['user_id'],
+                "username": user_data['username'] if USE_POSTGRES else user_data['username'],
+                "email": user_data['email'] if USE_POSTGRES else user_data['email'],
+                "full_name": user_data['full_name'] if USE_POSTGRES else user_data['full_name'],
+                "pilot_license": user_data['pilot_license'] if USE_POSTGRES else user_data['pilot_license'],
+                "created_at": str(user_data['created_at']) if USE_POSTGRES else user_data['created_at']
             }
         
         conn.close()

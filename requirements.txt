@@ -6,5 +6,8 @@ streamlit>=1.28.0
 openai>=1.0.0
 requests>=2.31.0
 
+# PostgreSQL support (for persistent database)
+psycopg2-binary>=2.9.0
+
 # No additional packages needed - all other modules are built-in Python
 # (sqlite3, hashlib, json, math, datetime are all standard library)

@@ -181,7 +181,7 @@ def show_main_app():
                 origin = st.selectbox("Origin", options=list(AIRPORTS.keys()),
                                     format_func=lambda x: f"{x} - {AIRPORTS[x]['name']}")
             with col2:
-                altitude = st.number_input("Altitude (ft)", value=35000, step=1000, min_value=20000, max_value=45000)
+                altitude = st.number_input("Altitude (ft)", value=35000, step=1000, min_value=30000, max_value=42000)
                 destination = st.selectbox("Destination", options=list(AIRPORTS.keys()),
                                          format_func=lambda x: f"{x} - {AIRPORTS[x]['name']}")
             
