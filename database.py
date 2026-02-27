@@ -138,30 +138,30 @@ def init_database():
     print("✅ Database initialized successfully")
     
     # Flight plans table
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS flight_plans (
-            plan_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            plan_name TEXT,
-            aircraft_code TEXT NOT NULL,
-            origin_icao TEXT NOT NULL,
-            destination_icao TEXT NOT NULL,
-            distance_nm REAL,
-            altitude_ft INTEGER,
-            headwind_kt REAL,
-            fuel_required_kg REAL,
-            flight_time_hr REAL,
-            route_data TEXT,
-            weather_data TEXT,
-            airspace_check TEXT,
-            etops_check TEXT,
-            status TEXT DEFAULT 'draft',
-            approved BOOLEAN DEFAULT 0,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users(user_id)
-        )
-    """)
+    cursor.execute(f"""
+            CREATE TABLE IF NOT EXISTS flight_plans (
+                plan_id {plan_id_type},
+                user_id INTEGER NOT NULL,
+                plan_name TEXT,
+                aircraft_code TEXT NOT NULL,
+                origin_icao TEXT NOT NULL,
+                destination_icao TEXT NOT NULL,
+                distance_nm REAL,
+                altitude_ft INTEGER,
+                headwind_kt REAL,
+                fuel_required_kg REAL,
+                flight_time_hr REAL,
+                route_data TEXT,
+                weather_data TEXT,
+                airspace_check TEXT,
+                etops_check TEXT,
+                status TEXT DEFAULT 'draft',
+                approved BOOLEAN DEFAULT false,
+                created_at TIMESTAMP {timestamp_default},
+                updated_at TIMESTAMP {timestamp_default},
+                FOREIGN KEY (user_id) REFERENCES users(user_id)
+            )
+        """)
     
     # Flight history table (actual flights)
     cursor.execute("""
