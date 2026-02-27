@@ -1,4 +1,5 @@
 # database.py
+# FIXED VERSION - 2026-02-27
 # User Authentication & Flight History Database
 # Supports both SQLite (local) and PostgreSQL (production)
 
